@@ -455,14 +455,92 @@ def _extract_openai_message_content(payload: Dict[str, Any]) -> str:
     return content if isinstance(content, str) else ""
 
 
-async def _build_image_parts_from_uri(uri: str) -> List[Dict[str, Any]]:
+async def _download_image_bytes(uri: str) -> Optional[bytes]:
+    """下载图片字节，三级 fallback：curl_cffi → wget → curl（复用 file_cache 的下载策略）。"""
+    # 方法1: curl_cffi (与 retrieve_image_data 一致)
+    image_bytes = await retrieve_image_data(uri)
+    if image_bytes:
+        return image_bytes
+
+    # 方法2: wget
+    try:
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as tmp:
+            tmp_path = tmp.name
+        wget_cmd = [
+            "wget", "-q", "-O", tmp_path,
+            "--timeout=60", "--tries=2",
+            f"--header=Referer: https://labs.google/",
+            uri,
+        ]
+        result = subprocess.run(wget_cmd, capture_output=True, timeout=90)
+        if result.returncode == 0:
+            import os
+            data = open(tmp_path, "rb").read()
+            os.unlink(tmp_path)
+            if data:
+                return data
+        try:
+            import os
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # 方法3: system curl
+    try:
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as tmp:
+            tmp_path = tmp.name
+        curl_cmd = [
+            "curl", "-L", "-s",
+            "-o", tmp_path,
+            "--max-time", "60",
+            "-H", "Referer: https://labs.google/",
+            uri,
+        ]
+        result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
+        if result.returncode == 0:
+            import os
+            data = open(tmp_path, "rb").read()
+            os.unlink(tmp_path)
+            if data:
+                return data
+        try:
+            import os
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    return None
+
+
+async def _build_image_parts_from_uri(uri: str, return_url: bool = False) -> List[Dict[str, Any]]:
     if uri.startswith("data:image"):
         mime_type, _ = _decode_data_url(uri)
         match = DATA_URL_RE.match(uri)
         if match:
             return [{"inlineData": {"mimeType": mime_type, "data": match.group("data")}}]
 
-    image_bytes = await retrieve_image_data(uri)
+    # type=url 时直接返回 fileData
+    if return_url:
+        return [
+            {
+                "fileData": {
+                    "mimeType": _guess_mime_type(uri, "image/png"),
+                    "fileUri": uri,
+                }
+            },
+            {"text": uri},
+        ]
+
+    # 默认：下载图片转 inlineData
+    image_bytes = await _download_image_bytes(uri)
     if image_bytes:
         mime_type = _detect_image_mime_type(
             image_bytes,
@@ -477,6 +555,7 @@ async def _build_image_parts_from_uri(uri: str) -> List[Dict[str, Any]]:
             }
         ]
 
+    # 下载失败，fallback 到 fileData
     return [
         {
             "fileData": {
@@ -499,7 +578,7 @@ def _build_video_parts_from_uri(uri: str) -> List[Dict[str, Any]]:
     ]
 
 
-async def _build_gemini_parts_from_output(output: str) -> List[Dict[str, Any]]:
+async def _build_gemini_parts_from_output(output: str, return_url: bool = False) -> List[Dict[str, Any]]:
     if not output:
         return []
 
@@ -507,7 +586,7 @@ async def _build_gemini_parts_from_output(output: str) -> List[Dict[str, Any]]:
     if image_matches:
         parts: List[Dict[str, Any]] = []
         for uri in image_matches:
-            parts.extend(await _build_image_parts_from_uri(uri))
+            parts.extend(await _build_image_parts_from_uri(uri, return_url=return_url))
         return parts
 
     video_matches = HTML_VIDEO_RE.findall(output)
@@ -523,6 +602,7 @@ async def _build_gemini_parts_from_output(output: str) -> List[Dict[str, Any]]:
 async def _build_gemini_success_payload(
     payload: Dict[str, Any],
     response_model: str,
+    return_url: bool = False,
 ) -> Dict[str, Any]:
     output = _extract_openai_message_content(payload)
     return {
@@ -530,7 +610,7 @@ async def _build_gemini_success_payload(
             {
                 "content": {
                     "role": "model",
-                    "parts": await _build_gemini_parts_from_output(output),
+                    "parts": await _build_gemini_parts_from_output(output, return_url=return_url),
                 },
                 "finishReason": "STOP",
                 "index": 0,
@@ -554,6 +634,7 @@ def _normalize_finish_reason(reason: Optional[str]) -> Optional[str]:
 async def _convert_openai_stream_chunk_to_gemini_event(
     payload: Dict[str, Any],
     response_model: str,
+    return_url: bool = False,
 ) -> Optional[str]:
     choices = payload.get("choices", [])
     if not choices:
@@ -568,7 +649,7 @@ async def _convert_openai_stream_chunk_to_gemini_event(
     if text:
         candidate["content"] = {
             "role": "model",
-            "parts": await _build_gemini_parts_from_output(text),
+            "parts": await _build_gemini_parts_from_output(text, return_url=return_url),
         }
     if finish_reason:
         candidate["finishReason"] = finish_reason
@@ -606,6 +687,7 @@ async def _iterate_openai_stream(
 async def _iterate_gemini_stream(
     normalized: NormalizedGenerationRequest,
     response_model: str,
+    return_url: bool = False,
 ):
     handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
@@ -628,6 +710,7 @@ async def _iterate_gemini_stream(
             event = await _convert_openai_stream_chunk_to_gemini_event(
                 payload,
                 response_model,
+                return_url=return_url,
             )
             if event:
                 yield event
@@ -643,6 +726,7 @@ async def _iterate_gemini_stream(
         event = await _convert_openai_stream_chunk_to_gemini_event(
             payload,
             response_model,
+            return_url=return_url,
         )
         if event:
             yield event
@@ -748,13 +832,14 @@ async def create_chat_completion(
 
 
 @router.post("/v1beta/models/{model}:generateContent")
-@router.post("/models/{model}:generateContent")
-async def generate_content(
+async def generate_content_v1beta(
     model: str,
     request: GeminiGenerateContentRequest,
+    type: Optional[str] = Query(None),
     api_key: str = Depends(verify_api_key_flexible),
 ):
-    """Gemini official generateContent endpoint."""
+    """Gemini official generateContent endpoint (v1beta, 默认返回 inlineData base64)."""
+    return_url = (type == "url")
     try:
         normalized = await _normalize_gemini_request(model, request)
         if not normalized.prompt:
@@ -771,7 +856,47 @@ async def generate_content(
             return _build_gemini_error_response_from_handler(payload)
 
         return JSONResponse(
-            content=await _build_gemini_success_payload(payload, model)
+            content=await _build_gemini_success_payload(payload, model, return_url=return_url)
+        )
+
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_build_gemini_error_payload(exc.status_code, str(exc.detail)),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content=_build_gemini_error_payload(500, str(exc)),
+        )
+
+
+@router.post("/models/{model}:generateContent")
+async def generate_content(
+    model: str,
+    request: GeminiGenerateContentRequest,
+    type: Optional[str] = Query(None),
+    api_key: str = Depends(verify_api_key_flexible),
+):
+    """Gemini generateContent endpoint (/models, 默认返回 fileData URL)."""
+    return_url = (type != "base64")
+    try:
+        normalized = await _normalize_gemini_request(model, request)
+        if not normalized.prompt:
+            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+
+        payload = _parse_handler_result(
+            await _collect_non_stream_result(
+                normalized.model,
+                normalized.prompt,
+                normalized.images,
+            )
+        )
+        if "error" in payload:
+            return _build_gemini_error_response_from_handler(payload)
+
+        return JSONResponse(
+            content=await _build_gemini_success_payload(payload, model, return_url=return_url)
         )
 
     except HTTPException as exc:
@@ -787,21 +912,58 @@ async def generate_content(
 
 
 @router.post("/v1beta/models/{model}:streamGenerateContent")
-@router.post("/models/{model}:streamGenerateContent")
-async def stream_generate_content(
+async def stream_generate_content_v1beta(
     model: str,
     request: GeminiGenerateContentRequest,
     alt: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
     api_key: str = Depends(verify_api_key_flexible),
 ):
-    """Gemini official streamGenerateContent endpoint."""
+    """Gemini official streamGenerateContent endpoint (v1beta, 默认返回 inlineData base64)."""
+    return_url = (type == "url")
     try:
         normalized = await _normalize_gemini_request(model, request)
         if not normalized.prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         return StreamingResponse(
-            _iterate_gemini_stream(normalized, model),
+            _iterate_gemini_stream(normalized, model, return_url=return_url),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_build_gemini_error_payload(exc.status_code, str(exc.detail)),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content=_build_gemini_error_payload(500, str(exc)),
+        )
+
+
+@router.post("/models/{model}:streamGenerateContent")
+async def stream_generate_content(
+    model: str,
+    request: GeminiGenerateContentRequest,
+    alt: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    api_key: str = Depends(verify_api_key_flexible),
+):
+    """Gemini streamGenerateContent endpoint (/models, 默认返回 fileData URL)."""
+    return_url = (type != "base64")
+    try:
+        normalized = await _normalize_gemini_request(model, request)
+        if not normalized.prompt:
+            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+
+        return StreamingResponse(
+            _iterate_gemini_stream(normalized, model, return_url=return_url),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

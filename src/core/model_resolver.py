@@ -22,10 +22,16 @@ IMAGE_BASE_MODELS = {
     "gemini-2.5-flash-image": "gemini-2.5-flash-image",
     # Gemini 3.0 Pro (GEM_PIX_2)
     "gemini-3.0-pro-image": "gemini-3.0-pro-image",
+    "gemini-3.0-pro-image-preview": "gemini-3.0-pro-image",
+    "gemini-3-pro-image-preview": "gemini-3.0-pro-image",
     # Gemini 3.1 Flash (NARWHAL)
     "gemini-3.1-flash-image": "gemini-3.1-flash-image",
+    "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
     # Imagen 4.0 (IMAGEN_3_5)
     "imagen-4.0-generate-preview": "imagen-4.0-generate-preview",
+    "imagen-4.0-fast-generate-001": "imagen-4.0-generate-preview",
+    "imagen-4.0-generate-001": "imagen-4.0-generate-preview",
+    "imagen-4.0-ultra-generate-001": "imagen-4.0-generate-preview",
 }
 
 # ──────────────────────────────────────────────
