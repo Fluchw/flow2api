@@ -1963,9 +1963,9 @@ class FlowClient:
                 pass
         elif config.captcha_method == "personal" and project_id:
             try:
-                from .browser_captcha_personal import BrowserCaptchaService
-                service = await BrowserCaptchaService.get_instance(self.db)
-                await service.report_flow_error(
+                from .browser_captcha_personal import BrowserCaptchaManager
+                manager = await BrowserCaptchaManager.get_instance(self.db)
+                await manager.report_flow_error(
                     project_id=project_id,
                     error_reason=error_reason or "",
                     error_message=error_message or "",
@@ -2147,10 +2147,10 @@ class FlowClient:
         # 内置浏览器打码 (nodriver)
         if captcha_method == "personal":
             try:
-                from .browser_captcha_personal import BrowserCaptchaService
-                service = await BrowserCaptchaService.get_instance(self.db)
-                token = await service.get_token(project_id, action)
-                fingerprint = service.get_last_fingerprint() if token else None
+                from .browser_captcha_personal import BrowserCaptchaManager
+                manager = await BrowserCaptchaManager.get_instance(self.db)
+                token = await manager.get_token(project_id, action)
+                fingerprint = manager.get_last_fingerprint(project_id) if token else None
                 self._set_request_fingerprint(fingerprint if token else None)
                 return token, None
             except RuntimeError as e:

@@ -85,25 +85,20 @@ async def lifespan(app: FastAPI):
     # Initialize browser captcha service if needed
     browser_service = None
     if captcha_config.captcha_method == "personal":
-        from .services.browser_captcha_personal import BrowserCaptchaService
-        browser_service = await BrowserCaptchaService.get_instance(db)
-        print("✓ Browser captcha service initialized (nodriver mode)")
-        
-        # 启动常驻模式：从第一个可用token获取project_id
+        from .services.browser_captcha_personal import BrowserCaptchaManager
+        browser_manager = await BrowserCaptchaManager.get_instance(db)
+        print("✓ Browser captcha manager initialized (nodriver multi-account mode)")
+
+        # 获取所有 token，按 email 分组启动常驻模式
         tokens = await token_manager.get_all_tokens()
-        resident_project_id = None
-        for t in tokens:
-            if t.current_project_id and t.is_active:
-                resident_project_id = t.current_project_id
-                break
-        
-        if resident_project_id:
-            # 直接启动常驻模式（会自动导航到项目页面，cookie已持久化）
-            await browser_service.start_resident_mode(resident_project_id)
-            print(f"✓ Browser captcha resident mode started (project: {resident_project_id[:8]}...)")
+        has_active = any(t.current_project_id and t.is_active for t in tokens)
+
+        if has_active:
+            await browser_manager.start_resident_mode_for_all(tokens)
+            print(f"✓ Browser captcha: {browser_manager.get_instance_count()} account(s) initialized")
         else:
-            # 没有可用的project_id时，打开登录窗口供用户手动操作
-            await browser_service.open_login_window()
+            # 没有可用的 token 时，打开登录窗口供用户手动操作
+            await browser_manager.open_login_window()
             print("⚠ No active token with project_id found, opened login window for manual setup")
     elif captcha_config.captcha_method == "browser":
         from .services.browser_captcha import BrowserCaptchaService
@@ -153,7 +148,15 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     # Close browser if initialized
-    if browser_service:
+    if captcha_config.captcha_method == "personal":
+        try:
+            from .services.browser_captcha_personal import BrowserCaptchaManager
+            manager = await BrowserCaptchaManager.get_instance()
+            await manager.close_all()
+            print("✓ Browser captcha manager closed (all instances)")
+        except Exception:
+            pass
+    elif browser_service:
         await browser_service.close()
         print("✓ Browser captcha service closed")
     print("✓ File cache cleanup task stopped")

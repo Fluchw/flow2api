@@ -1590,8 +1590,13 @@ async def test_captcha_score(
                 verify_proxy_source = "captcha_browser_proxy" if verify_proxy_used else "browser_direct"
                 verify_proxy_url = browser_proxy_url if verify_proxy_used else ""
         elif captcha_method == "personal":
-            from ..services.browser_captcha_personal import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(db)
+            from ..services.browser_captcha_personal import BrowserCaptchaManager
+            manager = await BrowserCaptchaManager.get_instance(db)
+            # 分数测试使用第一个可用实例
+            instances = manager.get_all_instances()
+            if not instances:
+                raise HTTPException(status_code=500, detail="没有可用的 personal 浏览器实例")
+            service = next(iter(instances.values()))
             score_payload = await service.get_custom_score(
                 website_url=website_url,
                 website_key=website_key,

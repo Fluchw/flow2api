@@ -5,6 +5,7 @@ from typing import Optional, List
 from ..core.database import Database
 from ..core.models import Token, Project
 from ..core.logger import debug_logger
+from ..core.config import config
 from .flow_client import FlowClient
 from .proxy_manager import ProxyManager
 
@@ -449,10 +450,10 @@ class TokenManager:
 
             debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST...")
 
-            from .browser_captcha_personal import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(self.db)
+            from .browser_captcha_personal import BrowserCaptchaManager
+            manager = await BrowserCaptchaManager.get_instance(self.db)
 
-            new_st = await service.refresh_session_token(token.current_project_id)
+            new_st = await manager.refresh_session_token(token.current_project_id)
             if new_st and new_st != token.st:
                 # 更新数据库中的 ST
                 await self.db.update_token(token_id, st=new_st)
@@ -491,6 +492,16 @@ class TokenManager:
                     current_project_id=selected_project.project_id,
                     current_project_name=selected_project.project_name,
                 )
+
+                # 注册 project_id -> email 映射（personal 模式多账号路由）
+                if config.captcha_method == "personal" and token.email:
+                    try:
+                        from .browser_captcha_personal import BrowserCaptchaManager
+                        manager = await BrowserCaptchaManager.get_instance(self.db)
+                        manager.register_project_email(selected_project.project_id, token.email)
+                    except Exception:
+                        pass
+
                 return selected_project.project_id
             except Exception as e:
                 raise ValueError(f"Failed to prepare project pool: {str(e)}")

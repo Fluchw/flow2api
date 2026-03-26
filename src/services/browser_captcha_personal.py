@@ -149,24 +149,38 @@ class ResidentTabInfo:
 
 class BrowserCaptchaService:
     """浏览器自动化获取 reCAPTCHA token（nodriver 有头模式）
-    
+
     支持两种模式：
     1. 常驻模式 (Resident Mode): 为每个 project_id 保持常驻标签页，即时生成 token
     2. 传统模式 (Legacy Mode): 每次请求创建新标签页 (fallback)
+
+    每个实例对应一个 Google 账号（email），使用独立的浏览器 profile 目录。
     """
 
     _instance: Optional['BrowserCaptchaService'] = None
     _lock = asyncio.Lock()
 
-    def __init__(self, db=None):
-        """初始化服务"""
+    def __init__(self, db=None, email: Optional[str] = None):
+        """初始化服务
+
+        Args:
+            db: 数据库实例
+            email: Google 账号邮箱，用于隔离浏览器 profile
+        """
         self.headless = False  # nodriver 有头模式
         self.browser = None
         self._initialized = False
         self.website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
         self.db = db
-        # 持久化 profile 目录
-        self.user_data_dir = os.path.join(os.getcwd(), "browser_data")
+        self.email = email
+        # 持久化 profile 目录（按 email 隔离）
+        base_dir = os.path.join(os.getcwd(), "browser_data")
+        if email:
+            # 用 email 作为子目录名（替换特殊字符）
+            safe_email = email.replace("@", "_at_").replace(".", "_")
+            self.user_data_dir = os.path.join(base_dir, safe_email)
+        else:
+            self.user_data_dir = base_dir
         
         # 常驻模式相关属性 (支持多 project_id)
         self._resident_tabs: dict[str, 'ResidentTabInfo'] = {}  # project_id -> 常驻标签页信息
@@ -184,12 +198,12 @@ class BrowserCaptchaService:
         self._custom_lock = asyncio.Lock()
 
     @classmethod
-    async def get_instance(cls, db=None) -> 'BrowserCaptchaService':
-        """获取单例实例"""
+    async def get_instance(cls, db=None, email: Optional[str] = None) -> 'BrowserCaptchaService':
+        """获取单例实例（向后兼容，无 email 时返回默认实例）"""
         if cls._instance is None:
             async with cls._lock:
                 if cls._instance is None:
-                    cls._instance = cls(db)
+                    cls._instance = cls(db, email=email)
         return cls._instance
     
     def _check_available(self):
@@ -1561,3 +1575,204 @@ class BrowserCaptchaService:
             "token_elapsed_ms": token_elapsed_ms,
             **verify_payload,
         }
+
+
+class BrowserCaptchaManager:
+    """管理多个 BrowserCaptchaService 实例，按 email 隔离浏览器 profile。
+
+    相同 email 的 token 共享一个浏览器实例，不同 email 使用独立实例。
+    """
+
+    _instance: Optional['BrowserCaptchaManager'] = None
+    _lock = asyncio.Lock()
+
+    def __init__(self, db=None):
+        self.db = db
+        self._instances: Dict[str, BrowserCaptchaService] = {}  # email -> service
+        self._instances_lock = asyncio.Lock()
+        # project_id -> email 映射，用于根据 project_id 路由到正确的浏览器实例
+        self._project_email_map: Dict[str, str] = {}
+
+    @classmethod
+    async def get_instance(cls, db=None) -> 'BrowserCaptchaManager':
+        """获取 Manager 单例"""
+        if cls._instance is None:
+            async with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls(db)
+        return cls._instance
+
+    def register_project_email(self, project_id: str, email: str):
+        """注册 project_id 与 email 的映射关系"""
+        if project_id and email:
+            self._project_email_map[project_id] = email
+            debug_logger.log_info(
+                f"[BrowserCaptchaManager] 注册映射: project={project_id[:8]}... -> email={email}"
+            )
+
+    def register_projects_from_tokens(self, tokens):
+        """从 token 列表批量注册 project_id -> email 映射"""
+        for t in tokens:
+            if t.current_project_id and t.email and t.is_active:
+                self._project_email_map[t.current_project_id] = t.email
+
+    async def get_service_for_email(self, email: str) -> BrowserCaptchaService:
+        """获取或创建指定 email 的浏览器实例"""
+        async with self._instances_lock:
+            if email not in self._instances:
+                debug_logger.log_info(
+                    f"[BrowserCaptchaManager] 为 {email} 创建新的浏览器实例"
+                )
+                service = BrowserCaptchaService(db=self.db, email=email)
+                self._instances[email] = service
+            return self._instances[email]
+
+    def _get_email_for_project(self, project_id: str) -> Optional[str]:
+        """根据 project_id 查找对应的 email"""
+        return self._project_email_map.get(project_id)
+
+    async def get_token(self, project_id: str, action: str = "IMAGE_GENERATION") -> Optional[str]:
+        """获取 reCAPTCHA token，自动路由到正确的浏览器实例
+
+        Args:
+            project_id: Flow 项目 ID
+            action: reCAPTCHA action 类型
+
+        Returns:
+            reCAPTCHA token 或 None
+        """
+        email = self._get_email_for_project(project_id)
+        if not email:
+            debug_logger.log_warning(
+                f"[BrowserCaptchaManager] project_id={project_id[:8]}... 未找到关联的 email，"
+                "尝试使用默认实例"
+            )
+            # fallback: 使用第一个可用实例，或创建一个无 email 的默认实例
+            if self._instances:
+                service = next(iter(self._instances.values()))
+            else:
+                service = BrowserCaptchaService(db=self.db)
+                self._instances["_default"] = service
+            return await service.get_token(project_id, action)
+
+        service = await self.get_service_for_email(email)
+        return await service.get_token(project_id, action)
+
+    def get_last_fingerprint(self, project_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """返回最近一次打码的浏览器指纹"""
+        if project_id:
+            email = self._get_email_for_project(project_id)
+            if email and email in self._instances:
+                return self._instances[email].get_last_fingerprint()
+        # fallback: 遍历所有实例找最后一个有指纹的
+        for service in self._instances.values():
+            fp = service.get_last_fingerprint()
+            if fp:
+                return fp
+        return None
+
+    async def report_flow_error(
+        self,
+        project_id: str,
+        error_reason: str,
+        error_message: str = "",
+    ):
+        """上报上游错误，路由到对应的浏览器实例进行自愈"""
+        email = self._get_email_for_project(project_id)
+        if email and email in self._instances:
+            await self._instances[email].report_flow_error(
+                project_id=project_id,
+                error_reason=error_reason,
+                error_message=error_message,
+            )
+        else:
+            debug_logger.log_warning(
+                f"[BrowserCaptchaManager] report_flow_error: "
+                f"project_id={project_id[:8]}... 未找到对应实例"
+            )
+
+    async def start_resident_mode_for_all(self, tokens):
+        """为所有活跃 token 按 email 分组启动常驻模式
+
+        Args:
+            tokens: token 列表
+        """
+        # 按 email 分组
+        email_projects: Dict[str, str] = {}  # email -> first project_id
+        for t in tokens:
+            if t.current_project_id and t.email and t.is_active:
+                self._project_email_map[t.current_project_id] = t.email
+                if t.email not in email_projects:
+                    email_projects[t.email] = t.current_project_id
+
+        if not email_projects:
+            debug_logger.log_warning(
+                "[BrowserCaptchaManager] 没有可用的活跃 token，跳过常驻模式启动"
+            )
+            return
+
+        for email, project_id in email_projects.items():
+            try:
+                service = await self.get_service_for_email(email)
+                await service.start_resident_mode(project_id)
+                debug_logger.log_info(
+                    f"[BrowserCaptchaManager] ✅ {email} 常驻模式已启动 "
+                    f"(project: {project_id[:8]}...)"
+                )
+                print(
+                    f"✓ Browser captcha resident mode started for {email} "
+                    f"(project: {project_id[:8]}...)"
+                )
+            except Exception as e:
+                debug_logger.log_error(
+                    f"[BrowserCaptchaManager] ❌ {email} 常驻模式启动失败: {e}"
+                )
+                print(f"❌ Browser captcha resident mode failed for {email}: {e}")
+
+    async def open_login_window(self, email: Optional[str] = None):
+        """打开登录窗口供用户手动登录 Google"""
+        if email:
+            service = await self.get_service_for_email(email)
+        else:
+            # 没有 email 时创建一个默认实例
+            if not self._instances:
+                service = BrowserCaptchaService(db=self.db)
+                self._instances["_default"] = service
+            else:
+                service = next(iter(self._instances.values()))
+        await service.open_login_window()
+
+    async def refresh_session_token(self, project_id: str) -> Optional[str]:
+        """刷新 Session Token，路由到对应的浏览器实例"""
+        email = self._get_email_for_project(project_id)
+        if email and email in self._instances:
+            return await self._instances[email].refresh_session_token(project_id)
+        # fallback
+        if self._instances:
+            service = next(iter(self._instances.values()))
+            return await service.refresh_session_token(project_id)
+        return None
+
+    def get_all_instances(self) -> Dict[str, BrowserCaptchaService]:
+        """获取所有浏览器实例"""
+        return dict(self._instances)
+
+    def get_instance_count(self) -> int:
+        """获取浏览器实例数量"""
+        return len(self._instances)
+
+    async def close_all(self):
+        """关闭所有浏览器实例"""
+        async with self._instances_lock:
+            for email, service in self._instances.items():
+                try:
+                    await service.close()
+                    debug_logger.log_info(
+                        f"[BrowserCaptchaManager] 已关闭 {email} 的浏览器实例"
+                    )
+                except Exception as e:
+                    debug_logger.log_warning(
+                        f"[BrowserCaptchaManager] 关闭 {email} 的浏览器实例失败: {e}"
+                    )
+            self._instances.clear()
+            self._project_email_map.clear()
