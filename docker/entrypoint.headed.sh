@@ -10,8 +10,18 @@ Xvfb "${DISPLAY}" -screen 0 "${XVFB_WHD}" -ac -nolisten tcp +extension RANDR >/t
 
 sleep 1
 
+# 清理 Chrome 残留锁文件（容器重启后必需）
+echo "[entrypoint] cleaning Chrome singleton locks"
+find /app/browser_data -name "SingletonLock" -o -name "SingletonCookie" -o -name "SingletonSocket" 2>/dev/null | xargs rm -f 2>/dev/null || true
+
 echo "[entrypoint] starting Fluxbox"
 fluxbox >/tmp/fluxbox.log 2>&1 &
+
+# 启动 VNC 服务（如果设置了 VNC_PORT 环境变量）
+if [ -n "${VNC_PORT:-}" ]; then
+  echo "[entrypoint] starting x11vnc on port ${VNC_PORT}"
+  x11vnc -display "${DISPLAY}" -forever -nopw -listen 0.0.0.0 -rfbport "${VNC_PORT}" -shared >/tmp/x11vnc.log 2>&1 &
+fi
 
 if [ -z "${BROWSER_EXECUTABLE_PATH:-}" ]; then
   BROWSER_EXECUTABLE_PATH="$(python - <<'PY'

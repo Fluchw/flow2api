@@ -248,11 +248,21 @@ class BrowserCaptchaService:
             # 确保 user_data_dir 存在
             os.makedirs(self.user_data_dir, exist_ok=True)
 
+            # 清理 Chrome 遗留的单例锁文件（容器重启后可能残留）
+            for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+                lock_path = os.path.join(self.user_data_dir, lock_file)
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+                    debug_logger.log_info(f"[BrowserCaptcha] 清理锁文件: {lock_path}")
+
             browser_executable_path = os.environ.get("BROWSER_EXECUTABLE_PATH", "").strip() or None
             if browser_executable_path:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] 使用指定浏览器可执行文件: {browser_executable_path}"
                 )
+
+            # 确保 DISPLAY 环境变量传递给 Chrome（有头模式需要）
+            display = os.environ.get("DISPLAY", ":99")
 
             # 启动 nodriver 浏览器
             self.browser = await uc.start(
@@ -1711,23 +1721,44 @@ class BrowserCaptchaManager:
             )
             return
 
+        started = 0
         for email, project_id in email_projects.items():
-            try:
-                service = await self.get_service_for_email(email)
-                await service.start_resident_mode(project_id)
-                debug_logger.log_info(
-                    f"[BrowserCaptchaManager] ✅ {email} 常驻模式已启动 "
-                    f"(project: {project_id[:8]}...)"
-                )
-                print(
-                    f"✓ Browser captcha resident mode started for {email} "
-                    f"(project: {project_id[:8]}...)"
-                )
-            except Exception as e:
-                debug_logger.log_error(
-                    f"[BrowserCaptchaManager] ❌ {email} 常驻模式启动失败: {e}"
-                )
-                print(f"❌ Browser captcha resident mode failed for {email}: {e}")
+            if started > 0:
+                await asyncio.sleep(10)  # 多账号间隔启动，避免浏览器并发冲突
+            success = False
+            for attempt in range(3):
+                try:
+                    if attempt > 0:
+                        await asyncio.sleep(10)
+                        # 重试前重置浏览器实例
+                        if email in self._instances:
+                            try:
+                                await self._instances[email].close()
+                            except Exception:
+                                pass
+                            del self._instances[email]
+                    service = await self.get_service_for_email(email)
+                    await service.start_resident_mode(project_id)
+                    debug_logger.log_info(
+                        f"[BrowserCaptchaManager] ✅ {email} 常驻模式已启动 "
+                        f"(project: {project_id[:8]}...)"
+                    )
+                    print(
+                        f"✓ Browser captcha resident mode started for {email} "
+                        f"(project: {project_id[:8]}...)"
+                    )
+                    started += 1
+                    success = True
+                    break
+                except Exception as e:
+                    import traceback
+                    print(f"❌ [BrowserCaptcha] {email} attempt {attempt+1}/3 failed: {e}")
+                    print(traceback.format_exc())
+                    debug_logger.log_error(
+                        f"[BrowserCaptchaManager] ❌ {email} 常驻模式启动失败 (attempt {attempt+1}/3): {e}"
+                    )
+            if not success:
+                print(f"❌ Browser captcha resident mode failed for {email}: all 3 attempts failed")
 
     async def open_login_window(self, email: Optional[str] = None):
         """打开登录窗口供用户手动登录 Google"""
