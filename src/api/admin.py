@@ -479,6 +479,11 @@ class ImportTokensRequest(BaseModel):
     tokens: List[ImportTokenItem]
 
 
+class OpenBrowserLoginRequest(BaseModel):
+    """打开浏览器登录窗口请求"""
+    email: Optional[str] = None
+
+
 # ========== Auth Middleware ==========
 
 async def verify_admin_token(authorization: str = Header(None)):
@@ -1993,3 +1998,30 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to add token: {str(e)}")
+
+
+# ========== Browser Login ==========
+
+@router.post("/api/browser/open-login")
+async def open_browser_login(
+    request: OpenBrowserLoginRequest,
+    token: str = Depends(verify_admin_token)
+):
+    """打开浏览器登录窗口，供用户通过 VNC 手动登录 Google 账号"""
+    captcha_config = await db.get_captcha_config()
+    if captcha_config.captcha_method != "personal":
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前打码模式为 {captcha_config.captcha_method}，仅 personal 模式支持浏览器登录"
+        )
+
+    try:
+        from ..services.browser_captcha_personal import BrowserCaptchaManager
+        manager = await BrowserCaptchaManager.get_instance(db)
+        email = request.email.strip() if request.email else None
+        await manager.open_login_window(email=email)
+
+        msg = f"浏览器登录窗口已打开（{email or '默认实例'}），请通过 VNC 登录 Google 账号"
+        return {"success": True, "message": msg, "email": email}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开浏览器失败: {str(e)}")

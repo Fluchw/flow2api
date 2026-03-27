@@ -117,6 +117,14 @@
                             </svg>
                             <span class="text-sm font-medium">导入</span>
                         </button>
+                        <button onclick="openBrowserLogin()" class="inline-flex items-center justify-center rounded-md bg-orange-600 text-white hover:bg-orange-700 h-8 px-3" title="打开浏览器登录Google账号（VNC）">
+                            <svg class="h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                                <line x1="8" y1="21" x2="16" y2="21"/>
+                                <line x1="12" y1="17" x2="12" y2="21"/>
+                            </svg>
+                            <span class="text-sm font-medium">浏览器登录</span>
+                        </button>
                         <button onclick="openAddModal()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-8 px-3">
                             <svg class="h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <line x1="12" y1="5" x2="12" y2="19"/>
@@ -809,6 +817,7 @@
         copyProjectId=async(projectId)=>{if(!projectId){showToast('没有可复制的Project ID','error');return}try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(projectId);showToast(`Project ID已复制: ${projectId}`,'success')}else{const textarea=document.createElement('textarea');textarea.value=projectId;textarea.style.position='fixed';textarea.style.opacity='0';document.body.appendChild(textarea);textarea.select();const success=document.execCommand('copy');document.body.removeChild(textarea);if(success){showToast(`Project ID已复制: ${projectId}`,'success')}else{showToast('复制失败: 浏览器不支持','error')}}}catch(e){showToast('复制失败: '+e.message,'error')}},
         openSora2Modal=(id)=>{$('sora2TokenId').value=id;$('sora2InviteCode').value='';$('sora2Modal').classList.remove('hidden')},
         closeSora2Modal=()=>{$('sora2Modal').classList.add('hidden');$('sora2TokenId').value='';$('sora2InviteCode').value=''},
+        openBrowserLogin=async()=>{const email=prompt('请输入 Google 邮箱（用于隔离浏览器 profile）：');if(email===null)return;const trimmed=email.trim();if(trimmed&&!trimmed.includes('@')){showToast('请输入有效的邮箱地址','error');return}try{showToast('正在打开浏览器登录窗口...','info');const r=await apiRequest('/api/browser/open-login',{method:'POST',body:JSON.stringify({email:trimmed||null})});if(!r)return;const d=await r.json();if(d.success){showToast(d.message+'\n请通过 VNC 连接服务器查看浏览器窗口','success')}else{showToast('打开失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('打开失败: '+e.message,'error')}},
         openImportModal=()=>{$('importModal').classList.remove('hidden');$('importFile').value=''},
         closeImportModal=()=>{$('importModal').classList.add('hidden');$('importFile').value=''},
         exportTokens=()=>{if(allTokens.length===0){showToast('没有Token可导出','error');return}const exportData=allTokens.map(t=>({email:t.email,access_token:t.token,session_token:t.st||null,is_active:t.is_active,captcha_proxy_url:t.captcha_proxy_url||'',image_enabled:t.image_enabled!==false,video_enabled:t.video_enabled!==false,image_concurrency:t.image_concurrency||(-1),video_concurrency:t.video_concurrency||(-1)}));const dataStr=JSON.stringify(exportData,null,2);const dataBlob=new Blob([dataStr],{type:'application/json'});const url=URL.createObjectURL(dataBlob);const link=document.createElement('a');link.href=url;link.download=`tokens_${new Date().toISOString().split('T')[0]}.json`;document.body.appendChild(link);link.click();document.body.removeChild(link);URL.revokeObjectURL(url);showToast(`已导出 ${allTokens.length} 个Token`,'success')},

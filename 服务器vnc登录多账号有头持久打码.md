@@ -1,5 +1,9 @@
 # 服务器 VNC 登录多账号有头持久打码
 
+vnc连接,浏览器要是最小化了按鼠标中键呼出
+https://psychz.dl.sourceforge.net/project/tigervnc/stable/1.16.2/vncviewer64-1.16.2.exe?viasf=1
+
+
 ## 重启/启动流程
 
 ```sh
